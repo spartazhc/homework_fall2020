@@ -9,6 +9,7 @@ import torch
 from torch import distributions
 
 from cs285.infrastructure import pytorch_util as ptu
+from cs285.infrastructure.utils import normalize
 from cs285.policies.base_policy import BasePolicy
 
 
@@ -92,10 +93,7 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
             observation = obs[None]
 
         # return the action that the policy prescribes
-        observation_tensor = torch.tensor(observation, dtype=torch.float).to(ptu.device)
-        action_distribution = self.forward(observation_tensor)
-
-        return action_distribution.sample().cpu().detach().numpy()
+        return ptu.to_numpy(self.forward(ptu.from_numpy(observation)).sample()))
 
     # update/train this policy
     def update(self, observations, actions, **kwargs):
@@ -110,10 +108,10 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
         if self.discrete:
             return distributions.Categorical(logits=self.logits_na(observation))
         else:
-            return distributions.Normal(
-                self.mean_net(observation),
-                torch.exp(self.logstd)[None],
-                )
+            return distributions.MultivariateNormal(
+                loc=self.mean_net(observation),
+                covariance_matrix=torch.diag(torch.exp(self.logstd)),
+            )
 
 
 #####################################################
@@ -138,20 +136,24 @@ class MLPPolicyPG(MLPPolicy):
             # by the `forward` method
         # HINT3: don't forget that `optimizer.step()` MINIMIZES a loss
 
-        loss = TODO
+        log_pi = self.forward(observations).log_prob(actions)
+
+        loss = torch.neg(torch.mean(torch.mul(log_pi, advantages)))
 
         # TODO: optimize `loss` using `self.optimizer`
         # HINT: remember to `zero_grad` first
-        TODO
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
         if self.nn_baseline:
             ## TODO: normalize the q_values to have a mean of zero and a standard deviation of one
             ## HINT: there is a `normalize` function in `infrastructure.utils`
-            targets = TODO
+            targets = normalize(q_values, np.mean(q_values), np.std(q_values))
             targets = ptu.from_numpy(targets)
 
             ## TODO: use the `forward` method of `self.baseline` to get baseline predictions
-            baseline_predictions = TODO
+            baseline_predictions = self.baseline.forward(observations).squeeze()
 
             ## avoid any subtle broadcasting bugs that can arise when dealing with arrays of shape
             ## [ N ] versus shape [ N x 1 ]
@@ -160,11 +162,13 @@ class MLPPolicyPG(MLPPolicy):
 
             # TODO: compute the loss that should be optimized for training the baseline MLP (`self.baseline`)
             # HINT: use `F.mse_loss`
-            baseline_loss = TODO
+            baseline_loss = F.mse_loss(baseline_predictions, targets)
 
             # TODO: optimize `baseline_loss` using `self.baseline_optimizer`
             # HINT: remember to `zero_grad` first
-            TODO
+            self.baseline_optimizer.zero_grad()
+            baseline_loss.backward()
+            self.baseline_optimizer.step()
 
         train_log = {
             'Training Loss': ptu.to_numpy(loss),
